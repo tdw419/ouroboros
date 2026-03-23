@@ -72,6 +72,7 @@ class EvolutionaryConfig:
     # Safety settings
     enable_watchdog: bool = True
     enable_sandbox: bool = True
+    enable_alignment_firewall: bool = True  # Prime Directive enforcement
     auto_rollback: bool = True
     max_consecutive_failures: int = 3
 
@@ -128,6 +129,7 @@ class EvolutionaryLoop:
         self._sandbox = None
         self._meta_engine = None
         self._dependency_mgr = None
+        self._alignment_firewall = None  # Prime Directive enforcement
 
         # Callbacks
         self.on_iteration_start: Optional[Callable[[int], None]] = None
@@ -194,6 +196,14 @@ class EvolutionaryLoop:
             sconfig = SafetyConfig()
             self._sandbox = SafetyValidator(sconfig, self.workspace)
         return self._sandbox
+
+    @property
+    def alignment_firewall(self):
+        """Get or create alignment firewall (Prime Directive enforcement)."""
+        if self._alignment_firewall is None and self.config.enable_alignment_firewall:
+            from .protocols.alignment import AlignmentFirewall
+            self._alignment_firewall = AlignmentFirewall(self.state_dir / "alignment")
+        return self._alignment_firewall
 
     @property
     def meta_engine(self):
@@ -367,7 +377,7 @@ class EvolutionaryLoop:
         # Override max iterations
         final_attempt = sim.run_task(task, max_iterations=self.config.max_revision_iterations)
 
-        return {
+        result = {
             "success": final_attempt.final_score >= self.config.convergence_threshold,
             "score": final_attempt.final_score,
             "iterations": final_attempt.iteration,
@@ -375,6 +385,22 @@ class EvolutionaryLoop:
             "code_changes": final_attempt.generator_output if final_attempt.final_score >= 0.5 else None,
             "insight": f"Generator/Critic converged at score {final_attempt.final_score:.2f} after {final_attempt.iteration} iterations",
         }
+
+        # Alignment Firewall: Validate BEFORE any execution
+        if result.get("code_changes") and self.alignment_firewall:
+            decision = self.alignment_firewall.validate(result["code_changes"])
+            if not decision.approved:
+                print(f"   🔥 ALIGNMENT FIREWALL BLOCKED: {decision.summary}")
+                result["success"] = False
+                result["blocked_by_firewall"] = True
+                result["firewall_decision"] = decision.summary
+                result["insight"] = f"Alignment violation: {decision.blocked_by}"
+                # Handle halt-level violations
+                if decision.halt_required:
+                    self.state = LoopState.STOPPED
+                    self._running = False
+
+        return result
 
     def _validate_safety(self, code: str) -> bool:
         """Validate code changes in sandbox."""
