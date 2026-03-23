@@ -188,18 +188,37 @@ Generate the next experiment spec and code."""
             if line.startswith("H:"):
                 hypothesis = line[2:].strip()
             elif line.startswith("T:"):
-                target = line[2:].strip()
+                # Sanitize: Remove commentary like "(Create new)" or extra spaces
+                raw_target = line[2:].strip()
+                target = re.split(r'[\s\(]', raw_target)[0]
             elif line.startswith("M:"):
-                metric = line[2:].strip()
+                # Sanitize: Remove commentary, keep the operator and value
+                raw_metric = line[2:].strip()
+                metric = raw_metric.split("(")[0].strip()
             elif line.startswith("B:"):
-                budget = line[2:].strip()
+                budget = line[2:].strip().split("(")[0].strip()
 
         # Extract code block
         code_changes = {}
         if target:
             code_match = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
             if code_match:
-                code_changes[target] = code_match.group(1).strip()
+                content = code_match.group(1).strip()
+                # NEW: Robust cleaning - strip accidental box chars from code
+                # But be careful not to strip legitimate operators if they look like box chars
+                # We specifically target the ones used in our ASCII spec
+                box_chars = "┌─┐│└┘├┤┬┴┼"
+                lines = content.split("\n")
+                cleaned_lines = []
+                for line in lines:
+                    # If a line is just box characters and whitespace, skip it
+                    if all(c in box_chars or c.isspace() for c in line) and len(line.strip()) > 0:
+                        continue
+                    # Otherwise, remove box chars from the edges (most common leak)
+                    cleaned_line = line.strip().strip(box_chars).strip()
+                    cleaned_lines.append(cleaned_line)
+                
+                code_changes[target] = "\n".join(cleaned_lines)
 
         spec = ExperimentSpec(
             hypothesis=hypothesis or "No hypothesis generated",
