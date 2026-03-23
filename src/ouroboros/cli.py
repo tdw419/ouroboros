@@ -11,9 +11,29 @@ from typing import List, Optional
 from .core.goal import GoalState
 from .core.loop import OuroborosLoop, LoopConfig
 from .core.safety import SafetyConfig, SafetyManager
+from .core.council import CouncilConfig, CouncilOrchestrator
+from .core.portal import OuroborosPortal
 
 app = typer.Typer(help="Ouroboros - Recursive Self-Prompting AI Loop")
 console = Console()
+
+
+@app.command()
+def portal(
+    workspace: Path = typer.Option(
+        Path("."), "--workspace", "-w", help="Workspace directory"
+    ),
+):
+    """Launch the live Ouroboros visual dashboard."""
+    workspace = workspace.resolve()
+    ouroboros_dir = workspace / ".ouroboros"
+
+    if not ouroboros_dir.exists():
+        console.print("❌ Not initialized. Run 'ouroboros init' first.")
+        raise typer.Exit(1)
+
+    p = OuroborosPortal(workspace)
+    p.run()
 
 
 @app.command()
@@ -152,6 +172,36 @@ def run(
 
 
 @app.command()
+def council(
+    workspace: Path = typer.Option(
+        Path("."), "--workspace", "-w", help="Workspace directory"
+    ),
+    workers: int = typer.Option(4, "--workers", "-n", help="Number of parallel workers"),
+    model: str = typer.Option(
+        "claude-sonnet-4-6-20250514", "--model", "-m", help="Model to use"
+    ),
+    delay: float = typer.Option(5.0, "--delay", "-d", help="Orchestrator polling delay"),
+):
+    """Run the Council of Ouroboros (Multi-Agent Swarm)."""
+    workspace = workspace.resolve()
+    ouroboros_dir = workspace / ".ouroboros"
+
+    if not ouroboros_dir.exists():
+        console.print("❌ Not initialized. Run 'ouroboros init' first.")
+        raise typer.Exit(1)
+
+    config = CouncilConfig(
+        workspace_path=workspace,
+        worker_count=workers,
+        model=model,
+        iteration_delay=delay,
+    )
+
+    orchestrator = CouncilOrchestrator(config)
+    orchestrator.run()
+
+
+@app.command()
 def status(
     workspace: Path = typer.Option(
         Path("."), "--workspace", "-w", help="Workspace directory"
@@ -208,25 +258,6 @@ def status(
 
             console.print(results_table)
 
-    # Show tree summary
-    tree_file = ouroboros_dir / "tree.yaml"
-    if tree_file.exists():
-        from .core.tree import ExperimentTree
-        exp_tree = ExperimentTree.load(tree_file)
-        tree_stats = exp_tree.get_statistics()
-
-        if tree_stats["total_nodes"] > 0:
-            console.print()
-            tree_summary = Table(title="Experiment Tree")
-            tree_summary.add_column("Metric", style="cyan")
-            tree_summary.add_column("Value", style="green")
-
-            tree_summary.add_row("Nodes", f"{tree_stats['total_nodes']} (Active: {tree_stats['active_nodes']}, Exhausted: {tree_stats['exhausted_nodes']})")
-            tree_summary.add_row("Max Depth", str(tree_stats["max_depth"]))
-            tree_summary.add_row("Best Node", f"{tree_stats['best_node_id']} (Metric: {tree_stats['best_metric']})")
-
-            console.print(tree_summary)
-
 
 @app.command()
 def tree(
@@ -236,44 +267,23 @@ def tree(
     stats: bool = typer.Option(False, "--stats", "-s", help="Show tree statistics"),
 ):
     """Visualize the experiment tree/flowchart."""
-    from .core.tree import ExperimentTree
-
     workspace = workspace.resolve()
     ouroboros_dir = workspace / ".ouroboros"
-
-    if not ouroboros_dir.exists():
-        console.print("❌ Not initialized. Run 'ouroboros init' first.")
-        raise typer.Exit(1)
-
     tree_file = ouroboros_dir / "tree.yaml"
-    if not tree_file.exists():
-        console.print("❌ No tree file found. Run 'ouroboros run' first.")
-        raise typer.Exit(1)
 
-    exp_tree = ExperimentTree.load(tree_file)
+    from .core.tree import ExperimentTree
+    tree = ExperimentTree.load(tree_file)
 
     if stats:
-        # Show statistics
-        tree_stats = exp_tree.get_statistics()
-        stats_table = Table(title="Experiment Tree Statistics")
-        stats_table.add_column("Metric", style="cyan")
-        stats_table.add_column("Value", style="green")
-
-        stats_table.add_row("Total Nodes", str(tree_stats["total_nodes"]))
-        stats_table.add_row("Active Nodes", str(tree_stats["active_nodes"]))
-        stats_table.add_row("Exhausted Nodes", str(tree_stats["exhausted_nodes"]))
-        stats_table.add_row("Achieved Nodes", str(tree_stats["achieved_nodes"]))
-        stats_table.add_row("Max Depth", str(tree_stats["max_depth"]))
-        stats_table.add_row("Best Metric", str(tree_stats["best_metric"] or "N/A"))
-        stats_table.add_row("Best Node", str(tree_stats["best_node_id"] or "N/A"))
-
-        console.print(stats_table)
-        console.print()
-
-    # Show flowchart
-    console.print("[bold]Experiment Flowchart:[/bold]")
-    console.print()
-    console.print(exp_tree.generate_ascii_flowchart())
+        s = tree.get_statistics()
+        table = Table(title="Experiment Tree Statistics")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        for k, v in s.items():
+            table.add_row(k.replace("_", " ").title(), str(v))
+        console.print(table)
+    else:
+        console.print(tree.generate_ascii_flowchart())
 
 
 @app.command()
