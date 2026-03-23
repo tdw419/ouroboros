@@ -15,3 +15,4 @@ build/
 
 # Ouroboros state
 .ouroboros/
+venv/

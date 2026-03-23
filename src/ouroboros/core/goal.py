@@ -29,12 +29,17 @@ class GoalState:
 
     @classmethod
     def load(cls, path: Path) -> "GoalState":
-        """Load goal state from YAML file."""
+        """Load goal state from YAML file with file locking."""
+        import fcntl
         if not path.exists():
             raise FileNotFoundError(f"Goal file not found: {path}")
 
-        with open(path) as f:
-            data = yaml.safe_load(f)
+        with open(path, "r") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_SH)
+                data = yaml.safe_load(f)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
         return cls(
             objective=data["objective"],
@@ -49,7 +54,8 @@ class GoalState:
         )
 
     def save(self, path: Path) -> None:
-        """Save goal state to YAML file."""
+        """Save goal state to YAML file with file locking."""
+        import fcntl
         data = {
             "objective": self.objective,
             "success_criteria": self.success_criteria,
@@ -63,7 +69,11 @@ class GoalState:
         }
 
         with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False)
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                yaml.dump(data, f, default_flow_style=False)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     def is_achieved(self, current_metric: float) -> bool:
         """Check if the success criteria is met."""

@@ -94,6 +94,24 @@ class OuroborosLoop:
             print(f"❌ Error during checkout: {e}")
             return False
 
+    def _is_exhausted(self, max_iterations: Optional[int] = None) -> bool:
+        """Check if loop is exhausted (time or iterations)."""
+        if self.goal is None:
+            return True
+        
+        # Use goal's max_iterations if not overridden
+        effective_max = max_iterations if max_iterations is not None else self.goal.max_iterations
+        
+        if self.goal.iterations >= effective_max:
+            return True
+            
+        # Time check
+        elapsed = datetime.now() - self.goal.created_at
+        if elapsed.total_seconds() / 3600 >= self.goal.max_time_hours:
+            return True
+            
+        return False
+
     def run(self) -> None:
         """Run the recursive loop until goal achieved or exhausted."""
         # Load or create goal
@@ -102,8 +120,10 @@ class OuroborosLoop:
         else:
             raise ValueError(f"Goal file not found: {self.config.goal_file}")
 
+        # In-memory override only
+        current_max_iter = self.goal.max_iterations
         if self.config.max_iterations is not None:
-            self.goal.max_iterations = self.config.max_iterations
+            current_max_iter = self.config.max_iterations
 
         # Initialize Tree if empty
         if not self.tree.nodes:
@@ -119,17 +139,17 @@ class OuroborosLoop:
             self.current_node_id = "root"
         else:
             # Resume from best node or last active node
-            best = self.tree.get_best_node(lower_is_better=True) # Assuming lower is better for pi error
+            best = self.tree.get_best_node(lower_is_better=True)
             self.current_node_id = best.id if best else self.tree.root_id
 
         print(f"🎯 Goal: {self.goal.objective}")
         print(f"📊 Success criteria: {self.goal.success_criteria}")
-        print(f"🔄 Starting loop (max {self.goal.max_iterations} iterations)")
+        print(f"🔄 Starting loop (max {current_max_iter} iterations)")
         if self.config.dry_run:
             print("🏃 DRY RUN MODE - no actual changes will be made")
         print()
 
-        while not self.goal.is_exhausted():
+        while not self._is_exhausted(current_max_iter):
             # Check if achieved
             if self.goal.best_metric is not None:
                 if self.goal.is_achieved(self.goal.best_metric):
@@ -144,7 +164,7 @@ class OuroborosLoop:
             codebase_context = self._read_codebase_context()
 
             # Generate next experiment
-            print(f"🔄 Iteration {self.goal.iterations + 1}/{self.goal.max_iterations}")
+            print(f"🔄 Iteration {self.goal.iterations + 1}/{current_max_iter}")
             print(f"📍 Current Path: {self.current_node_id}")
             
             spec = self.generator.generate_next(
@@ -189,7 +209,9 @@ class OuroborosLoop:
                 elapsed = time.time() - start_time
 
                 # Update Tree
-                new_node_id = f"node_{self.goal.iterations}"
+                # Use a more unique ID to avoid collisions in parallel mode
+                timestamp_id = int(time.time() * 1000) % 100000
+                new_node_id = f"node_{self.goal.iterations}_{timestamp_id}"
 
                 # Calculate convergence rate from parent
                 parent_node = self.tree.get_node(self.current_node_id)
@@ -205,9 +227,10 @@ class OuroborosLoop:
                     hypothesis=spec.hypothesis,
                     parent_id=self.current_node_id,
                     status="active" if result.get("status") == "keep" else "exhausted",
-                    depth=self.tree.get_node(self.current_node_id).depth + 1,
+                    depth=parent_node.depth + 1 if parent_node else 0,
                     time_spent_seconds=elapsed,
-                    convergence_rate=convergence_rate,
+                    iterations_at_node=1,
+                    convergence_rate=convergence_rate
                 )
                 self.tree.add_node(new_node)
                 
@@ -226,10 +249,10 @@ class OuroborosLoop:
 
             self.goal.save(self.config.goal_file)
 
-            if not self.goal.is_exhausted():
+            if not self._is_exhausted(current_max_iter):
                 time.sleep(self.config.iteration_delay_seconds)
 
-        if self.goal.is_exhausted():
+        if self._is_exhausted(current_max_iter):
             print("⚠️ Loop exhausted")
             self._update_goal_state("exhausted")
 
@@ -341,11 +364,22 @@ class OuroborosLoop:
         return None
 
     def _log_result(self, spec: ExperimentSpec, result: dict) -> None:
+        """Append result to the results log (TSV format) with locking."""
+        import fcntl
         header = "timestamp\thypothesis\ttarget\tstatus\tmetric\n"
         row = f"{result['timestamp']}\t{spec.hypothesis[:50]}\t{spec.target}\t{result['status']}\t{result['metric']}\n"
+        
+        # Create file with header if it doesn't exist
         if not self.config.results_file.exists():
-            with open(self.config.results_file, "w") as f: f.write(header)
-        with open(self.config.results_file, "a") as f: f.write(row)
+            with open(self.config.results_file, "w") as f:
+                f.write(header)
+
+        with open(self.config.results_file, "a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                f.write(row)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     def _update_goal_state(self, state: str) -> None:
         if self.goal:
