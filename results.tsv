@@ -9,3 +9,7 @@ b63fbaeabe340ed78d449970388be71d005735c9	1.0	discard	<Fix incomplete AST logic t
 ad03857becc870ede85fd3905e6e0f0521e42d90	11.0	discard	Fix critical IndentationError and SyntaxError in generate_tests.py to enable AST parsing and test generation. - No improvement: 11.0000 -> 11.0000	2026-03-22T21:46:37.931880
 dd20a306ec644566d959cd7621ed8884f9ef3927	11.0	discard	Fix syntax errors in generate_tests.py to enable test generation. - No improvement: 11.0000 -> 11.0000	2026-03-22T21:46:52.678754
 f4092c0735aafdaa50a549456906b776b9d9f44e	11.0	discard	Fix IndentationError in generate_tests.py to restore test generation pipeline. - No improvement: 11.0000 -> 11.0000	2026-03-22T21:47:00.787205
+21df2334411cdb698912f398e984177bdeaaadf2	1.0	keep	The `generate_tests.py` script is syntactically broken - Improved metric from 11.0000 to 1.0000	2026-03-22T21:47:30.938833
+21df2334411cdb698912f398e984177bdeaaadf2	0.0	crash	Fix the syntax errors in `generate_tests.py` (specifically the - Experiment failed: Could not extract metric from output: Generated test file at: /home/jericho/zion/projects/ouroboros/ouroboros/tests/test_generated.py
+...	2026-03-22T21:47:59.238949
+095d01fa059ac49caff03c3001b4bcd6031de9e2	0.0	discard	Run the test generator to create a baseline test suite for all - No improvement: 0.0000 -> 0.0000	2026-03-22T21:48:52.090876

@@ -3,6 +3,27 @@ import re
 import sys
 import os
 
+def generate_tests():
+    """Runs the test generation script to ensure test stubs exist."""
+    try:
+        print("Generating test stubs...")
+        gen_script = "generate_tests.py"
+        if os.path.exists(gen_script):
+            result = subprocess.run(
+                ["python3", gen_script],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                print(f"Warning: Test generation failed: {result.stderr}")
+            else:
+                print(f"Test generation output: {result.stdout}")
+        else:
+            print("Warning: generate_tests.py not found, skipping generation.")
+    except Exception as e:
+        print(f"Error during test generation: {e}")
+
 def get_coverage():
     try:
         # Attempt to use the virtual environment's pytest if it exists
@@ -45,6 +66,10 @@ def get_coverage():
         return 0.0
 
 if __name__ == "__main__":
+    # Step 1: Generate tests to ensure we have something to run
+    generate_tests()
+    
+    # Step 2: Get coverage
     coverage = get_coverage()
     print(f"METRIC: {coverage}")
     sys.exit(0)

@@ -202,18 +202,26 @@ Generate the next experiment spec and code."""
         # Extract code block
         code_changes = {}
         if target:
-            code_match = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
+            # 1. Try to find a block explicitly labeled as python
+            code_match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
+            if code_match:
+                print(f"DEBUG: Found 'python' code block for {target}")
+            
+            # 2. If not found, try any code block
+            if not code_match:
+                code_match = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
+                if code_match:
+                    print(f"DEBUG: Found fallback code block for {target}")
+                
             if code_match:
                 content = code_match.group(1).strip()
-                # NEW: Robust cleaning - strip accidental box chars from code
-                # Preserve leading whitespace (indentation) by only subbing the chars
+                # Robust cleaning - strip accidental box chars from code
+                # Preserve leading whitespace (indentation)
                 box_chars_re = r'[┌─┐│└┘├┤┬┴┼]'
                 lines = content.split("\n")
                 cleaned_lines = []
                 for line in lines:
-                    # Remove box chars but keep everything else
                     cleaned_line = re.sub(box_chars_re, '', line)
-                    # Only skip if the line was ONLY box chars/whitespace and is now empty
                     if line.strip() and not cleaned_line.strip():
                         continue
                     cleaned_lines.append(cleaned_line)

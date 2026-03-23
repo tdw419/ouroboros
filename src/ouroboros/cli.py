@@ -287,6 +287,21 @@ def tree(
 
 
 @app.command()
+def tui(
+    workspace: Path = typer.Option(
+        Path("."), "--workspace", "-w", help="Workspace directory"
+    ),
+):
+    """Launch the interactive TUI for self-prompting AI loop."""
+    workspace = workspace.resolve()
+    ouroboros_dir = workspace / ".ouroboros"
+    ouroboros_dir.mkdir(exist_ok=True)
+
+    from .tui import run_tui
+    run_tui(ouroboros_dir)
+
+
+@app.command()
 def reset(
     workspace: Path = typer.Option(
         Path("."), "--workspace", "-w", help="Workspace directory"
