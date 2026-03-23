@@ -188,9 +188,10 @@ Generate the next experiment spec and code."""
             if line.startswith("H:"):
                 hypothesis = line[2:].strip()
             elif line.startswith("T:"):
-                # Sanitize: Remove commentary like "(Create new)" or extra spaces
+                # Sanitize: Remove commentary like "(Create new)" or extra spaces or brackets
                 raw_target = line[2:].strip()
-                target = re.split(r'[\s\(]', raw_target)[0]
+                # Remove brackets, parentheses and take the first word
+                target = re.split(r'[\s\(\)]', raw_target.strip("<>"))[0]
             elif line.startswith("M:"):
                 # Sanitize: Remove commentary, keep the operator and value
                 raw_metric = line[2:].strip()
@@ -205,17 +206,16 @@ Generate the next experiment spec and code."""
             if code_match:
                 content = code_match.group(1).strip()
                 # NEW: Robust cleaning - strip accidental box chars from code
-                # But be careful not to strip legitimate operators if they look like box chars
-                # We specifically target the ones used in our ASCII spec
-                box_chars = "┌─┐│└┘├┤┬┴┼"
+                # Preserve leading whitespace (indentation) by only subbing the chars
+                box_chars_re = r'[┌─┐│└┘├┤┬┴┼]'
                 lines = content.split("\n")
                 cleaned_lines = []
                 for line in lines:
-                    # If a line is just box characters and whitespace, skip it
-                    if all(c in box_chars or c.isspace() for c in line) and len(line.strip()) > 0:
+                    # Remove box chars but keep everything else
+                    cleaned_line = re.sub(box_chars_re, '', line)
+                    # Only skip if the line was ONLY box chars/whitespace and is now empty
+                    if line.strip() and not cleaned_line.strip():
                         continue
-                    # Otherwise, remove box chars from the edges (most common leak)
-                    cleaned_line = line.strip().strip(box_chars).strip()
                     cleaned_lines.append(cleaned_line)
                 
                 code_changes[target] = "\n".join(cleaned_lines)

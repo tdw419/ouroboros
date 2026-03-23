@@ -359,6 +359,13 @@ class OuroborosLoop:
 
     def _extract_metric(self, output: str, metric_spec: str) -> Optional[float]:
         import re
+        
+        # 1. Look for explicit METRIC: prefix (preferred)
+        metric_match = re.search(r"METRIC:\s*([-+]?\d*\.\d+|\d+)", output)
+        if metric_match:
+            return float(metric_match.group(1))
+            
+        # 2. Fallback to any float in the output
         matches = re.findall(r"[-+]?\d*\.\d+|\d+", output)
         if matches: return float(matches[0])
         return None
