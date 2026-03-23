@@ -1,0 +1,32 @@
+[project]
+name = "ouroboros"
+version = "0.1.0"
+description = "Recursive self-prompting AI loop - the brain that drives autonomous experimentation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+    "gitpython>=3.1.0",
+    # Local dependency on openspec+autoresearch
+    # Install with: pip install -e ../openspec+autoresearch/openspec+autoresearch
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+ouroboros = "ouroboros.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ouroboros"]

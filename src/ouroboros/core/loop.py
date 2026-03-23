@@ -1,0 +1,353 @@
+"""
+Ouroboros Loop - The Recursive Driver
+
+Connects the brain (self-prompting) to the body (experiment execution).
+"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Callable, TYPE_CHECKING, List
+import time
+import subprocess
+import os
+
+from .goal import GoalState
+from .prompt_generator import SelfPromptGenerator, ExperimentSpec
+from .code_applier import CodeApplier
+from .tree import ExperimentTree, ExperimentNode
+
+if TYPE_CHECKING:
+    from .safety import SafetyManager
+
+# Try to import the body (openspec+autoresearch)
+# Falls back to simple shell execution if not available
+try:
+    from autospec.autoresearch.ascii_runtime import ASCIIExperimentRuntime
+    HAS_AUTOSPEC = True
+except ImportError:
+    HAS_AUTOSPEC = False
+
+
+@dataclass
+class LoopConfig:
+    """Configuration for the Ouroboros loop."""
+
+    # Paths
+    workspace_path: Path
+    goal_file: Path
+    results_file: Path
+    tree_file: Path
+
+    # Timing
+    iteration_delay_seconds: float = 5.0
+
+    # LLM
+    model: str = "claude-sonnet-4-6-20250514"
+
+    # Execution
+    dry_run: bool = False
+    max_iterations: Optional[int] = None
+
+    # Safety
+    safety_manager: Optional["SafetyManager"] = None
+
+
+class OuroborosLoop:
+    """
+    The recursive self-prompting loop with branching support.
+    """
+
+    def __init__(self, config: LoopConfig):
+        self.config = config
+        self.generator = SelfPromptGenerator(model=config.model)
+        self.applier = CodeApplier(workspace_path=config.workspace_path)
+        self.goal: Optional[GoalState] = None
+        self.tree = ExperimentTree.load(config.tree_file)
+        self.current_node_id: Optional[str] = None
+
+    def _get_current_commit(self) -> str:
+        """Get current git commit hash."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"], 
+                cwd=self.config.workspace_path, 
+                capture_output=True, 
+                text=True, 
+                check=True
+            )
+            return result.stdout.strip()
+        except:
+            return "0000000000000000000000000000000000000000"
+
+    def _checkout_commit(self, commit_hash: str) -> bool:
+        """Checkout a specific commit."""
+        try:
+            subprocess.run(
+                ["git", "checkout", commit_hash], 
+                cwd=self.config.workspace_path, 
+                capture_output=True, 
+                check=True
+            )
+            return True
+        except Exception as e:
+            print(f"❌ Error during checkout: {e}")
+            return False
+
+    def run(self) -> None:
+        """Run the recursive loop until goal achieved or exhausted."""
+        # Load or create goal
+        if self.config.goal_file.exists():
+            self.goal = GoalState.load(self.config.goal_file)
+        else:
+            raise ValueError(f"Goal file not found: {self.config.goal_file}")
+
+        if self.config.max_iterations is not None:
+            self.goal.max_iterations = self.config.max_iterations
+
+        # Initialize Tree if empty
+        if not self.tree.nodes:
+            root_commit = self._get_current_commit()
+            root_node = ExperimentNode(
+                id="root",
+                commit_hash=root_commit,
+                metric=None,
+                hypothesis="Initial state",
+                status="baseline"
+            )
+            self.tree.add_node(root_node)
+            self.current_node_id = "root"
+        else:
+            # Resume from best node or last active node
+            best = self.tree.get_best_node(lower_is_better=True) # Assuming lower is better for pi error
+            self.current_node_id = best.id if best else self.tree.root_id
+
+        print(f"🎯 Goal: {self.goal.objective}")
+        print(f"📊 Success criteria: {self.goal.success_criteria}")
+        print(f"🔄 Starting loop (max {self.goal.max_iterations} iterations)")
+        if self.config.dry_run:
+            print("🏃 DRY RUN MODE - no actual changes will be made")
+        print()
+
+        while not self.goal.is_exhausted():
+            # Check if achieved
+            if self.goal.best_metric is not None:
+                if self.goal.is_achieved(self.goal.best_metric):
+                    print(f"✅ Goal achieved! Metric: {self.goal.best_metric}")
+                    self._update_goal_state("achieved")
+                    break
+
+            # 1. PIVOT CHECK: Does the AI want to backtrack?
+            tree_ascii = self.tree.generate_ascii_flowchart()
+            
+            # Read codebase context
+            codebase_context = self._read_codebase_context()
+
+            # Generate next experiment
+            print(f"🔄 Iteration {self.goal.iterations + 1}/{self.goal.max_iterations}")
+            print(f"📍 Current Path: {self.current_node_id}")
+            
+            spec = self.generator.generate_next(
+                goal=self.goal.objective,
+                success_criteria=self.goal.success_criteria,
+                results_tsv=self.config.results_file,
+                codebase_context=codebase_context,
+                tree_ascii=tree_ascii
+            )
+
+            decision = spec.metadata.get("decision", "REFINE")
+            if decision.startswith("PIVOT"):
+                target_node_id = decision.split()[-1]
+                target_node = self.tree.get_node(target_node_id)
+                if target_node:
+                    print(f"🔀 PIVOTING to node: {target_node_id}")
+                    if not self.config.dry_run:
+                        self._checkout_commit(target_node.commit_hash)
+                    self.current_node_id = target_node_id
+                else:
+                    print(f"⚠️ Warning: Requested pivot to unknown node {target_node_id}. Refining current instead.")
+
+            print(f"📋 Hypothesis: {spec.hypothesis}")
+            print(f"📁 Target: {spec.target}")
+            print(f"📏 Metric: {spec.metric}")
+            print()
+
+            self.goal = self.goal.increment()
+
+            if self.config.dry_run:
+                print("🏃 DRY RUN - skipping execution")
+                print(spec.to_ascii())
+                self._log_result(spec, {
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "dry_run",
+                    "metric": None,
+                })
+            else:
+                # Execution
+                start_time = time.time()
+                result = self._execute_experiment(spec)
+                elapsed = time.time() - start_time
+
+                # Update Tree
+                new_node_id = f"node_{self.goal.iterations}"
+
+                # Calculate convergence rate from parent
+                parent_node = self.tree.get_node(self.current_node_id)
+                convergence_rate = None
+                if parent_node and parent_node.metric is not None and result.get("metric") is not None:
+                    if parent_node.metric != 0:
+                        convergence_rate = (result["metric"] - parent_node.metric) / abs(parent_node.metric)
+
+                new_node = ExperimentNode(
+                    id=new_node_id,
+                    commit_hash=result.get("commit", self._get_current_commit()),
+                    metric=result.get("metric"),
+                    hypothesis=spec.hypothesis,
+                    parent_id=self.current_node_id,
+                    status="active" if result.get("status") == "keep" else "exhausted",
+                    depth=self.tree.get_node(self.current_node_id).depth + 1,
+                    time_spent_seconds=elapsed,
+                    convergence_rate=convergence_rate,
+                )
+                self.tree.add_node(new_node)
+                
+                # If we kept it, this becomes the new current node
+                if result.get("status") == "keep":
+                    self.current_node_id = new_node_id
+                    if result.get("metric") is not None:
+                        self.goal = self.goal.update_best(result["metric"])
+
+                self._log_result(spec, result)
+                self.tree.save(self.config.tree_file)
+
+                print(f"📊 Result: {result.get('status', 'unknown')}")
+                print(f"📈 Metric: {result.get('metric', 'N/A')}")
+                print()
+
+            self.goal.save(self.config.goal_file)
+
+            if not self.goal.is_exhausted():
+                time.sleep(self.config.iteration_delay_seconds)
+
+        if self.goal.is_exhausted():
+            print("⚠️ Loop exhausted")
+            self._update_goal_state("exhausted")
+
+    def _read_codebase_context(self, max_files: int = 3, max_lines: int = 100) -> str:
+        """Read relevant code files."""
+        context_parts = []
+        priority_files = ["pi_approximator.py", "train.py", "main.py", "app.py", "test.py"]
+        found_files = []
+        for filename in priority_files:
+            filepath = self.config.workspace_path / filename
+            if filepath.exists():
+                found_files.append(filepath)
+
+        if len(found_files) < max_files:
+            for py_file in self.config.workspace_path.glob("*.py"):
+                if py_file not in found_files and not py_file.name.startswith("."):
+                    found_files.append(py_file)
+                    if len(found_files) >= max_files: break
+
+        for filepath in found_files[:max_files]:
+            try:
+                with open(filepath) as f:
+                    lines = f.readlines()[:max_lines]
+                content = "".join(lines)
+                context_parts.append(f"### {filepath.name}\n```python\n{content}\n```")
+            except Exception as e:
+                context_parts.append(f"### {filepath.name}\nError: {e}")
+
+        return "\n\n".join(context_parts) if context_parts else "No context"
+
+    def _execute_experiment(self, spec: ExperimentSpec) -> dict:
+        """Execute experiment."""
+        result = {
+            "hypothesis": spec.hypothesis,
+            "target": spec.target,
+            "status": "pending",
+            "metric": None,
+            "output": "",
+            "timestamp": datetime.now().isoformat(),
+        }
+        try:
+            if HAS_AUTOSPEC:
+                result = self._execute_with_autospec(spec)
+            else:
+                if spec.code_changes: self.applier.apply(spec.code_changes)
+                result = self._execute_with_shell(spec)
+        except Exception as e:
+            result["status"] = "error"
+            result["output"] = str(e)
+        return result
+
+    def _execute_with_autospec(self, spec: ExperimentSpec) -> dict:
+        """Execute using openspec+autoresearch runtime."""
+        from autospec.autoresearch.loop import Hypothesis
+        from autospec.autoresearch.ascii_spec import ASCIISpecParser
+
+        try:
+            runtime = ASCIIExperimentRuntime(self.config.workspace_path)
+            parser = ASCIISpecParser()
+            ascii_spec = parser.parse(spec.to_ascii())
+            
+            hypothesis = Hypothesis(
+                task_id=ascii_spec.experiment_id or "AUTO",
+                description=spec.hypothesis,
+                expected_improvement=0.1,
+                code_changes=spec.code_changes
+            )
+            
+            loop = runtime._spec_to_loop(ascii_spec)
+            exp_result = loop.run(hypothesis)
+
+            return {
+                "hypothesis": spec.hypothesis,
+                "target": spec.target,
+                "status": exp_result.status.value if hasattr(exp_result.status, 'value') else str(exp_result.status),
+                "metric": exp_result.metric,
+                "commit": exp_result.commit_hash,
+                "output": getattr(exp_result, 'output', ''),
+                "timestamp": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            print(f"DEBUG: _execute_with_autospec failed: {str(e)}")
+            return {"status": "error", "output": str(e)}
+
+    def _execute_with_shell(self, spec: ExperimentSpec) -> dict:
+        """Fallback shell execution."""
+        result = {"hypothesis": spec.hypothesis, "target": spec.target, "status": "pending", "metric": None, "output": "", "timestamp": datetime.now().isoformat()}
+        try:
+            eval_command = self._get_eval_command(spec)
+            proc = subprocess.run(eval_command, shell=True, capture_output=True, text=True, cwd=self.config.workspace_path, timeout=300)
+            result["output"] = proc.stdout + proc.stderr
+            result["returncode"] = proc.returncode
+            result["metric"] = self._extract_metric(result["output"], spec.metric)
+            result["status"] = "success" if proc.returncode == 0 else "failed"
+        except Exception as e:
+            result["status"] = "error"
+            result["output"] = str(e)
+        return result
+
+    def _get_eval_command(self, spec: ExperimentSpec) -> str:
+        if self.config.workspace_path.joinpath("pytest.ini").exists(): return "pytest -v --tb=short"
+        elif self.config.workspace_path.joinpath("test.py").exists(): return "python3 test.py"
+        else: return f"python3 {spec.target}"
+
+    def _extract_metric(self, output: str, metric_spec: str) -> Optional[float]:
+        import re
+        matches = re.findall(r"[-+]?\d*\.\d+|\d+", output)
+        if matches: return float(matches[0])
+        return None
+
+    def _log_result(self, spec: ExperimentSpec, result: dict) -> None:
+        header = "timestamp\thypothesis\ttarget\tstatus\tmetric\n"
+        row = f"{result['timestamp']}\t{spec.hypothesis[:50]}\t{spec.target}\t{result['status']}\t{result['metric']}\n"
+        if not self.config.results_file.exists():
+            with open(self.config.results_file, "w") as f: f.write(header)
+        with open(self.config.results_file, "a") as f: f.write(row)
+
+    def _update_goal_state(self, state: str) -> None:
+        if self.goal:
+            self.goal.current_state = state
+            self.goal.save(self.config.goal_file)
