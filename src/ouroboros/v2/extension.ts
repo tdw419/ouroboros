@@ -352,6 +352,7 @@ export default function (pi: ExtensionAPI) {
                 metaPromptRules = `\n## Learned Rules\n${metaData.rules.map((r: any) => `- ${r}`).join("\n")}\n`;
             }
         } catch (e) {
+            console.error("Meta-prompt fetch failed:", e);
             // Continue without meta rules
         }
 

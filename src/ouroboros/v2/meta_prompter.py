@@ -27,6 +27,7 @@ def update(insights_json):
         click.echo(json.dumps(result, indent=2))
     except Exception as e:
         click.echo(json.dumps({"error": str(e)}))
+        raise click.Exit(1)
 
 @cli.command()
 def get_prompt():
@@ -59,6 +60,7 @@ def get_current():
         }, indent=2))
     except Exception as e:
         click.echo(json.dumps({"error": str(e), "rules": []}))
+        raise click.Exit(1)
 
 
 if __name__ == "__main__":
