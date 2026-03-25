@@ -340,21 +340,36 @@ export default function (pi: ExtensionAPI) {
     });
 
     async function triggerNextPrompt(ctx: any) {
+        // NEW: Get evolved prompts from meta-prompter
+        let metaPromptRules = "";
+        try {
+            const metaResult = await pi.exec("bash", [
+                "-c",
+                `export PYTHONPATH=. && python3 src/ouroboros/v2/meta_prompter.py get-current 2>/dev/null || echo "{}"`,
+            ]);
+            const metaData = JSON.parse(metaResult.stdout || "{}");
+            if (metaData.rules && metaData.rules.length > 0) {
+                metaPromptRules = `\n## Learned Rules\n${metaData.rules.map((r: any) => `- ${r}`).join("\n")}\n`;
+            }
+        } catch (e) {
+            // Continue without meta rules
+        }
+
         // Read current Roadmap to guide the agent
         const roadmap = await updateRoadmapStatus(ctx);
         const milestone = roadmap ? roadmap.current_milestone : "Unknown";
         const tasks = roadmap ? roadmap.active_tasks.join("\n- ") : "No active tasks";
 
         ctx.ui.notify(`🔄 Ouroboros Iteration ${state.iterations + 1} Starting...`, "info");
-        
+
         const history = ctx.sessionManager.getBranch();
         const lastMessages = history.slice(-5).filter((m: any) => m.type === "message").map((m: any) => (m as any).message.content);
-        
+
         const reflectionPrompt = `
 You are in an Ouroboros Recursive Self-Improvement Loop.
 Iteration: ${state.iterations}
 Phase: ${milestone}
-
+${metaPromptRules}
 ## Strategic Roadmap
 Your current objective is to complete the tasks in: ${milestone}
 Active Tasks:
