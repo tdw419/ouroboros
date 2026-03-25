@@ -311,6 +311,22 @@ export default function (pi: ExtensionAPI) {
             await updateMetaPrompts(ctx);
         }
 
+        // Every 10 iterations, check research results for optimization
+        if (state.iterations % 10 === 0) {
+            try {
+                const bestResult = await pi.exec("bash", [
+                    "-c",
+                    `export PYTHONPATH=. && python3 src/ouroboros/v2/harness.py get-best-metric --metric val_bpb`,
+                ]);
+                const bestData = JSON.parse(bestResult.stdout);
+                if (bestData.best_metric && bestData.best_metric < 1.90) {
+                    ctx.ui.notify(`Optimization target achieved! val_bpb: ${bestData.best_metric}`, "success");
+                }
+            } catch (e) {
+                console.error("Best metric check failed:", e);
+            }
+        }
+
         // --- BACKOFF PHASE ---
         ctx.ui.notify(`💤 Rest Phase (${state.restPeriodMs/1000}s) to avoid Rate Limits...`, "info");
         setTimeout(() => {
