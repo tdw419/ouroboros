@@ -1,16 +1,30 @@
 """
-Self-Prompt Generator
+Self-Prompt Generator - V2 with Unified Engine Integration
 
 Generates the next hypothesis/experiment based on past results.
+Uses the unified prompt engine for multi-provider support and analytics.
+
 This is the "brain" that reads feedback and decides what to try next.
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any
-import anthropic
+from typing import Optional, Dict, Any, List
 import os
 import re
+import json
+
+# Import unified engine components
+try:
+    from .unified_prompt_engine import (
+        UnifiedPromptEngine, PromptRegistry, ContextProvider,
+        PromptCategory, create_default_engine
+    )
+    from .queue_bridge import PromptQueueBridge, PromptResult
+    from ..protocols.semantic_analyzer import SemanticAnalyzer
+    HAS_UNIFIED_ENGINE = True
+except ImportError:
+    HAS_UNIFIED_ENGINE = False
 
 
 @dataclass
@@ -21,7 +35,7 @@ class ExperimentSpec:
     target: str  # T: File(s) to modify
     metric: str  # M: Success criteria
     budget: str  # B: Time budget
-    code_changes: Dict[str, str] = field(default_factory=dict) # NEW: target -> new_content
+    code_changes: Dict[str, str] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_ascii(self) -> str:
@@ -47,7 +61,8 @@ class SelfPromptGenerator:
     1. Reading the results log (past attempts)
     2. Reading the experiment tree (flowchart of paths)
     3. Reading the goal state (what we're trying to achieve)
-    4. Using an LLM to decide: REFINE current path, PIVOT to other path, or HALT
+    4. Using the unified prompt engine for LLM calls
+    5. Applying semantic analysis for pattern-aware decisions
     """
 
     SYSTEM_PROMPT = """You are an autonomous research strategist in a recursive self-improvement loop.
@@ -77,10 +92,28 @@ After the ASCII block, provide the full content of the target file in a markdown
 If PIVOTING, explain why the current path failed and why the new path is better.
 """
 
-    def __init__(self, model: str = "claude-sonnet-4-6-20250514"):
+    def __init__(self, 
+                 model: str = "claude-sonnet-4-6-20250514",
+                 use_unified_engine: bool = True,
+                 project_root: Optional[Path] = None):
         self.model = model
-        self.use_mock = not os.getenv("ANTHROPIC_API_KEY")
-        if not self.use_mock:
+        self.project_root = project_root or Path.cwd()
+        
+        # Initialize unified engine if available and requested
+        self.engine: Optional[UnifiedPromptEngine] = None
+        self.semantic_analyzer: Optional[SemanticAnalyzer] = None
+        
+        if use_unified_engine and HAS_UNIFIED_ENGINE:
+            try:
+                self.engine = create_default_engine(self.project_root / ".ouroboros")
+                self.semantic_analyzer = SemanticAnalyzer(self.project_root / ".ouroboros" / "semantic")
+            except Exception as e:
+                print(f"Warning: Failed to initialize unified engine: {e}")
+        
+        # Fallback to direct Anthropic if no unified engine
+        self.use_mock = not os.getenv("ANTHROPIC_API_KEY") and self.engine is None
+        if not self.use_mock and self.engine is None:
+            import anthropic
             self.client = anthropic.Anthropic()
 
     def generate_next(
@@ -93,11 +126,90 @@ If PIVOTING, explain why the current path failed and why the new path is better.
     ) -> ExperimentSpec:
         """
         Generate the next experiment based on goal, results, and tree structure.
+        
+        Uses unified engine if available, otherwise falls back to direct API.
         """
+        # Get learned rules from semantic analyzer
+        learned_rules = ""
+        if self.semantic_analyzer:
+            rules = self.semantic_analyzer.get_rules()
+            if rules:
+                learned_rules = "\n".join(f"- {r}" for r in rules[:10])
+        
+        # If we have the unified engine, use it
+        if self.engine:
+            return self._generate_with_engine(
+                goal, success_criteria, results_tsv, codebase_context, tree_ascii, learned_rules
+            )
+        
+        # Fallback to mock or direct API
         if self.use_mock:
             return self._generate_mock(goal, results_tsv)
+        
+        return self._generate_with_anthropic(
+            goal, success_criteria, results_tsv, codebase_context, tree_ascii
+        )
 
+    def _generate_with_engine(
+        self,
+        goal: str,
+        success_criteria: str,
+        results_tsv: Optional[Path],
+        codebase_context: Optional[str],
+        tree_ascii: Optional[str],
+        learned_rules: str
+    ) -> ExperimentSpec:
+        """Generate using unified prompt engine with async support."""
+        import asyncio
+        
         # Build context
+        results_context = ""
+        if results_tsv and results_tsv.exists():
+            with open(results_tsv) as f:
+                results_context = f.read()
+        
+        # Set context for template
+        self.engine.context.set("goal", goal)
+        self.engine.context.set("success_criteria", success_criteria)
+        self.engine.context.set("tree_ascii", tree_ascii or "No tree data")
+        self.engine.context.set("recent_results", results_context or "No results yet")
+        self.engine.context.set("codebase_context", codebase_context or "No context")
+        self.engine.context.set("learned_rules", learned_rules or "No rules yet")
+        
+        # Read iteration count
+        iteration = 0
+        if results_tsv and results_tsv.exists():
+            with open(results_tsv) as f:
+                iteration = len(f.readlines()) - 1
+        self.engine.context.set("iteration", str(iteration + 1))
+        
+        try:
+            # Execute via unified engine (async)
+            result = asyncio.run(self.engine.execute_prompt(
+                "hypothesis_generation",
+                track_outcome=True
+            ))
+            
+            if result.success and result.content:
+                return self._parse_response(result.content)
+            
+            # Fallback to mock on failure
+            print(f"Warning: Engine returned unsuccessful result: {result.error}")
+            return self._generate_mock(goal, results_tsv)
+            
+        except Exception as e:
+            print(f"Warning: Engine execution failed: {e}")
+            return self._generate_mock(goal, results_tsv)
+
+    def _generate_with_anthropic(
+        self,
+        goal: str,
+        success_criteria: str,
+        results_tsv: Optional[Path],
+        codebase_context: Optional[str],
+        tree_ascii: Optional[str]
+    ) -> ExperimentSpec:
+        """Generate using direct Anthropic API (fallback)."""
         results_context = ""
         if results_tsv and results_tsv.exists():
             with open(results_tsv) as f:
@@ -138,7 +250,6 @@ Generate the next experiment spec and code."""
         target = "pi_approximator.py"
         idx = min(iteration, len(hypotheses) - 1)
         
-        # Mock code content for each iteration
         mock_codes = [
             "# Leibniz improvement mock code\ndef approximate_pi(): return 3.1415",
             "# Archimedes mock code\ndef approximate_pi(): return 3.14159",
@@ -188,12 +299,9 @@ Generate the next experiment spec and code."""
             if line.startswith("H:"):
                 hypothesis = line[2:].strip()
             elif line.startswith("T:"):
-                # Sanitize: Remove commentary like "(Create new)" or extra spaces or brackets
                 raw_target = line[2:].strip()
-                # Remove brackets, parentheses and take the first word
                 target = re.split(r'[\s\(\)]', raw_target.strip("<>"))[0]
             elif line.startswith("M:"):
-                # Sanitize: Remove commentary, keep the operator and value
                 raw_metric = line[2:].strip()
                 metric = raw_metric.split("(")[0].strip()
             elif line.startswith("B:"):
@@ -202,21 +310,12 @@ Generate the next experiment spec and code."""
         # Extract code block
         code_changes = {}
         if target:
-            # 1. Try to find a block explicitly labeled as python
             code_match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
-            if code_match:
-                print(f"DEBUG: Found 'python' code block for {target}")
-            
-            # 2. If not found, try any code block
             if not code_match:
                 code_match = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
-                if code_match:
-                    print(f"DEBUG: Found fallback code block for {target}")
                 
             if code_match:
                 content = code_match.group(1).strip()
-                # Robust cleaning - strip accidental box chars from code
-                # Preserve leading whitespace (indentation)
                 box_chars_re = r'[┌─┐│└┘├┤┬┴┼]'
                 lines = content.split("\n")
                 cleaned_lines = []
@@ -237,3 +336,27 @@ Generate the next experiment spec and code."""
         )
         spec.metadata["decision"] = decision
         return spec
+    
+    def record_outcome(self, action_type: str, metric_before: float, 
+                       metric_after: float, success: bool = True):
+        """Record an outcome for semantic analysis."""
+        if self.semantic_analyzer:
+            self.semantic_analyzer.record_action(
+                action_type=action_type,
+                action_detail=f"Metric: {metric_before} -> {metric_after}",
+                metric_before=metric_before,
+                metric_after=metric_after,
+                event_success=success
+            )
+    
+    def get_learned_rules(self) -> List[str]:
+        """Get learned rules from semantic analysis."""
+        if self.semantic_analyzer:
+            return self.semantic_analyzer.get_rules()
+        return []
+
+
+# === Backward Compatibility ===
+
+# Old import path still works
+SelfPrompter = SelfPromptGenerator

@@ -275,6 +275,18 @@ class CouncilOrchestrator:
         """Stop all workers and cleanup."""
         self.running = False
         print(f"🛑 Stopping {len(self.processes)} workers...")
+        
+        # Release all locked nodes in the tree
+        try:
+            tree = ExperimentTree.load(self.tree_file)
+            for wid in self.processes.keys():
+                node_id = self._get_node_for_worker(tree, wid)
+                if node_id:
+                    tree.release_node(node_id)
+            tree.save(self.tree_file)
+        except Exception as e:
+            print(f"⚠️ Warning releasing nodes during stop: {e}")
+
         for wid, proc in self.processes.items():
             if proc.is_alive():
                 os.kill(proc.pid, signal.SIGTERM)

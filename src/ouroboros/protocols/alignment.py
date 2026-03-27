@@ -70,6 +70,16 @@ class ValidationResult:
     action_taken: ViolationAction
     context: dict = field(default_factory=dict)
 
+    def to_dict(self) -> dict:
+        return {
+            "passed": self.passed,
+            "directive_id": self.directive_id,
+            "directive_name": self.directive_name,
+            "message": self.message,
+            "action_taken": self.action_taken.value,
+            "context": self.context,
+        }
+
 
 @dataclass
 class FirewallDecision:
@@ -81,6 +91,17 @@ class FirewallDecision:
     quarantine_required: bool = False
     human_review_required: bool = False
     summary: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "approved": self.approved,
+            "results": [r.to_dict() for r in self.results],
+            "blocked_by": self.blocked_by,
+            "halt_required": self.halt_required,
+            "quarantine_required": self.quarantine_required,
+            "human_review_required": self.human_review_required,
+            "summary": self.summary,
+        }
 
 
 # === BUILT-IN VALIDATORS ===
@@ -125,8 +146,8 @@ def validate_no_evaluation_tampering(code: str, context: dict) -> bool:
 def validate_no_dangerous_operations(code: str, context: dict) -> bool:
     """Ensure no dangerous operations are attempted."""
     dangerous = [
-        (r"eval\s*\(", "eval() can execute arbitrary code"),
-        (r"exec\s*\(", "exec() can execute arbitrary code"),
+        (r"(?<!\.)\beval\s*\(", "eval() can execute arbitrary code"),
+        (r"(?<!\.)\bexec\s*\(", "exec() can execute arbitrary code"),
         (r"__import__\s*\(", "__import__ can bypass import controls"),
         (r"os\.system\s*\(", "os.system can run shell commands"),
         (r"subprocess\..*shell\s*=\s*True", "shell=True is dangerous"),

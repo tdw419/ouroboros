@@ -56,26 +56,51 @@ Ouroboros is an autonomous AI system that generates its own prompts, executes th
 
 ## Quick Start
 
+### Initialize a New Project
+
 ```bash
-# Install
-pip install -e .
+# Create a new project directory
+mkdir my-project && cd my-project
 
-# Initialize
-ouroboros init --objective "Improve test coverage to > 90%" \
-               --criteria "coverage >= 90" \
-               --workspace .
+# Initialize Ouroboros
+ouroboros-init.sh "My Project Name"
 
-# Run interactive TUI
-ouroboros tui
+# Or use full path
+/home/jericho/zion/projects/ouroboros/ouroboros/ouroboros-init.sh "My Project Name"
+```
 
-# Run headless
-ouroboros run --max-iter 100
+### Check Provider Status
 
-# Check status
-ouroboros status
+```bash
+./queue.sh check
+```
 
-# View experiment tree
-ouroboros tree
+### View Queue Dashboard
+
+```bash
+# One-time view
+./queue.sh dashboard
+
+# Live view (auto-refresh)
+./queue.sh dashboard --watch
+```
+
+### Enqueue and Process Prompts
+
+```bash
+# Add prompts to queue
+./queue.sh enqueue "Analyze test coverage"
+./queue.sh enqueue "Review code quality"
+
+# Process the queue
+./queue.sh process
+```
+
+### Login to OAuth Providers
+
+```bash
+./queue.sh login gemini
+./queue.sh login claude
 ```
 
 ## The Self-Prompting Loop

@@ -16,6 +16,9 @@ from .goal import GoalState
 from .prompt_generator import SelfPromptGenerator, ExperimentSpec
 from .code_applier import CodeApplier
 from .tree import ExperimentTree, ExperimentNode
+from .ctrm_prompt_manager import CTRMPromptManager
+from .unified_prompt_engine import create_default_engine, PromptCategory
+from ..protocols.semantic_analyzer import SemanticAnalyzer
 
 if TYPE_CHECKING:
     from .safety import SafetyManager
@@ -38,6 +41,7 @@ class LoopConfig:
     goal_file: Path
     results_file: Path
     tree_file: Path
+    db_path: Path = Path("/home/jericho/zion/projects/ctrm/ctrm/data/truths.db")
 
     # Timing
     iteration_delay_seconds: float = 5.0
@@ -56,12 +60,31 @@ class LoopConfig:
 class OuroborosLoop:
     """
     The recursive self-prompting loop with branching support.
+    Integrated with CTRM and Unified Prompt Engine.
     """
 
     def __init__(self, config: LoopConfig):
         self.config = config
-        self.generator = SelfPromptGenerator(model=config.model)
+        self.project_root = config.workspace_path
+        
+        # 1. Initialize Components
+        print("--- Initializing Ouroboros Core ---")
+        self.ctrm = CTRMPromptManager(config.db_path)
+        self.engine = create_default_engine(self.project_root / ".ouroboros")
+        self.semantic = SemanticAnalyzer(self.project_root / ".ouroboros/semantic")
+        
+        # Inject dependencies
+        self.engine.semantic_analyzer = self.semantic
+        self.engine.ascii_dashboard_path = self.project_root / ".ouroboros/dashboard.ascii"
+        
+        # Legacy components (refactored to use new ones internally)
+        self.generator = SelfPromptGenerator(
+            model=config.model, 
+            project_root=self.project_root,
+            use_unified_engine=True
+        )
         self.applier = CodeApplier(workspace_path=config.workspace_path)
+        
         self.goal: Optional[GoalState] = None
         self.tree = ExperimentTree.load(config.tree_file)
         self.current_node_id: Optional[str] = None
@@ -124,6 +147,13 @@ class OuroborosLoop:
         current_max_iter = self.goal.max_iterations
         if self.config.max_iterations is not None:
             current_max_iter = self.config.max_iterations
+        
+        # Initialize ASCII Dashboard State
+        self.engine.update_ascii_state(
+            status="running",
+            max_iterations=current_max_iter,
+            experiment={"hypothesis": "Initializing...", "target": "N/A", "metric": "N/A", "budget": "N/A"}
+        )
 
         # Initialize Tree if empty
         if not self.tree.nodes:
@@ -146,7 +176,7 @@ class OuroborosLoop:
         print(f"📊 Success criteria: {self.goal.success_criteria}")
         print(f"🔄 Starting loop (max {current_max_iter} iterations)")
         if self.config.dry_run:
-            print("🏃 DRY RUN MODE - no actual changes will be made")
+            print("跑 DRY RUN MODE - no actual changes will be made")
         print()
 
         while not self._is_exhausted(current_max_iter):
@@ -155,17 +185,19 @@ class OuroborosLoop:
                 if self.goal.is_achieved(self.goal.best_metric):
                     print(f"✅ Goal achieved! Metric: {self.goal.best_metric}")
                     self._update_goal_state("achieved")
+                    self.engine.update_ascii_state(status="stopped")
                     break
 
-            # 1. PIVOT CHECK: Does the AI want to backtrack?
+            # 1. Context Collection
             tree_ascii = self.tree.generate_ascii_flowchart()
-            
-            # Read codebase context
             codebase_context = self._read_codebase_context()
 
-            # Generate next experiment
+            # 2. Generate next experiment
             print(f"🔄 Iteration {self.goal.iterations + 1}/{current_max_iter}")
             print(f"📍 Current Path: {self.current_node_id}")
+            
+            # Update Dashboard for reasoning phase
+            self.engine.update_ascii_state(status="running")
             
             spec = self.generator.generate_next(
                 goal=self.goal.objective,
@@ -173,6 +205,13 @@ class OuroborosLoop:
                 results_tsv=self.config.results_file,
                 codebase_context=codebase_context,
                 tree_ascii=tree_ascii
+            )
+
+            # Record reasoning action in CTRM
+            self.ctrm.enqueue(
+                f"Generated hypothesis: {spec.hypothesis} for target {spec.target}",
+                priority=2,
+                source="ouroboros_loop"
             )
 
             decision = spec.metadata.get("decision", "REFINE")
@@ -205,15 +244,35 @@ class OuroborosLoop:
             else:
                 # Execution
                 start_time = time.time()
+                
+                # Update Dashboard for execution phase
+                self.engine.write_ascii_dashboard(
+                    status="running",
+                    experiment={
+                        "hypothesis": spec.hypothesis[:50],
+                        "target": spec.target,
+                        "metric": spec.metric,
+                        "budget": spec.budget
+                    },
+                    tree={"nodes": [n.id for n in self.tree.nodes], "current": self.current_node_id}
+                )
+                
                 result = self._execute_experiment(spec)
                 elapsed = time.time() - start_time
 
+                # Record outcome for semantic analysis
+                self.semantic.record_action(
+                    action_type="apply_code_change",
+                    action_detail=f"H: {spec.hypothesis} T: {spec.target}",
+                    metric_before=self.goal.best_metric or 0,
+                    metric_after=result.get("metric") or (self.goal.best_metric or 0),
+                    event_success=result.get("status") == "success"
+                )
+
                 # Update Tree
-                # Use a more unique ID to avoid collisions in parallel mode
                 timestamp_id = int(time.time() * 1000) % 100000
                 new_node_id = f"node_{self.goal.iterations}_{timestamp_id}"
 
-                # Calculate convergence rate from parent
                 parent_node = self.tree.get_node(self.current_node_id)
                 convergence_rate = None
                 if parent_node and parent_node.metric is not None and result.get("metric") is not None:
@@ -250,11 +309,13 @@ class OuroborosLoop:
             self.goal.save(self.config.goal_file)
 
             if not self._is_exhausted(current_max_iter):
+                self.engine.update_ascii_state(status="paused")
                 time.sleep(self.config.iteration_delay_seconds)
 
         if self._is_exhausted(current_max_iter):
             print("⚠️ Loop exhausted")
             self._update_goal_state("exhausted")
+            self.engine.update_ascii_state(status="stopped")
 
     def _read_codebase_context(self, max_files: int = 3, max_lines: int = 100) -> str:
         """Read relevant code files."""

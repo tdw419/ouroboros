@@ -41,6 +41,9 @@ class GoalState:
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
+        if not data:
+            raise ValueError(f"Goal file is empty: {path}")
+
         return cls(
             objective=data["objective"],
             success_criteria=data["success_criteria"],
@@ -56,6 +59,9 @@ class GoalState:
     def save(self, path: Path) -> None:
         """Save goal state to YAML file with file locking."""
         import fcntl
+        import os
+        import tempfile
+
         data = {
             "objective": self.objective,
             "success_criteria": self.success_criteria,
@@ -68,12 +74,22 @@ class GoalState:
             "max_time_hours": self.max_time_hours,
         }
 
-        with open(path, "w") as f:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                yaml.dump(data, f, default_flow_style=False)
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+        # Use temporary file for atomic write
+        fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    yaml.dump(data, f, default_flow_style=False)
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            
+            # Atomic swap
+            os.replace(temp_path, path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
 
     def is_achieved(self, current_metric: float) -> bool:
         """Check if the success criteria is met."""
